@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.0.0
+// @version      1.0.1
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page.
 // @match        https://www.torn.com/hospitalview.php
 // @license      UNLICENSE
@@ -350,6 +350,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.style.cssText = `
             display: inline-flex;
             align-items: center;
+            vertical-align: middle;
             justify-content: center;
             height: 24px;
             line-height: 1;
