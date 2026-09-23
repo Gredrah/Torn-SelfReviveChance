@@ -4,6 +4,17 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const DEFAULT_SINCE_SECONDS = 24 * 60 * 60;
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 500;
+
+function jsonResponse(body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders },
+  });
+}
+
 function asOptionalInt(value) {
   const parsed = Number.parseInt(value, 10);
   return Number.isFinite(parsed) ? parsed : null;
@@ -44,6 +55,65 @@ export default {
     const url = new URL(request.url);
     const { pathname } = url;
 
+    const reviveEventsPathMatch = /^\/revive-events\/(target|reviver)\/(\d+)$/.exec(pathname);
+    if (request.method === "GET" && reviveEventsPathMatch) {
+      const role = reviveEventsPathMatch[1];
+      const playerId = asOptionalInt(reviveEventsPathMatch[2]);
+
+      if (!Number.isFinite(playerId) || playerId <= 0) {
+        return jsonResponse({ error: "Invalid playerId" }, 400);
+      }
+
+      const sinceSecondsRaw = url.searchParams.get("since_seconds");
+      const sinceSeconds = sinceSecondsRaw == null ? DEFAULT_SINCE_SECONDS : asOptionalInt(sinceSecondsRaw);
+      if (!Number.isFinite(sinceSeconds) || sinceSeconds <= 0) {
+        return jsonResponse({ error: "Invalid since_seconds" }, 400);
+      }
+
+      const limitRaw = url.searchParams.get("limit");
+      let limit = limitRaw == null ? DEFAULT_LIMIT : asOptionalInt(limitRaw);
+      if (!Number.isFinite(limit) || limit <= 0) {
+        return jsonResponse({ error: "Invalid limit" }, 400);
+      }
+      limit = Math.min(limit, MAX_LIMIT);
+
+      const serverTime = Math.floor(Date.now() / 1000);
+      const sinceTimestamp = Math.max(0, serverTime - sinceSeconds);
+      const columnName = role === "target" ? "target_id" : "reviver_id";
+
+      const rows = await env.DB.prepare(
+        `SELECT
+          revive_id,
+          revive_timestamp,
+          target_id,
+          reviver_id,
+          chance,
+          result,
+          source_user_id,
+          pulled_at
+        FROM revive_events
+        WHERE ${columnName} = ?
+          AND revive_timestamp >= ?
+        ORDER BY revive_timestamp DESC, revive_id DESC
+        LIMIT ?`
+      ).bind(playerId, sinceTimestamp, limit).all();
+
+      const data = Array.isArray(rows?.results) ? rows.results : [];
+
+      return jsonResponse({
+        data,
+        meta: {
+          role,
+          player_id: playerId,
+          since_seconds: sinceSeconds,
+          since_timestamp: sinceTimestamp,
+          server_time: serverTime,
+          count: data.length,
+          limit,
+        },
+      });
+    }
+
     if (request.method === "POST" && pathname === "/revivesfull") {
       try {
         const body = await request.json();
@@ -70,9 +140,7 @@ export default {
         });
 
         if (normalizedRecords.length === 0) {
-          return new Response(JSON.stringify({ success: true, inserted: 0, skipped: records.length }), {
-            headers: { "Content-Type": "application/json", ...corsHeaders },
-          });
+          return jsonResponse({ success: true, inserted: 0, skipped: records.length });
         }
 
         const statement = `
@@ -114,16 +182,11 @@ export default {
 
         await env.DB.batch(batchedWrites);
 
-        return new Response(
-          JSON.stringify({
-            success: true,
-            inserted: normalizedRecords.length,
-            skipped: records.length - normalizedRecords.length,
-          }),
-          {
-            headers: { "Content-Type": "application/json", ...corsHeaders },
-          }
-        );
+        return jsonResponse({
+          success: true,
+          inserted: normalizedRecords.length,
+          skipped: records.length - normalizedRecords.length,
+        });
       } catch (err) {
         console.error("[revive-worker] Failed to parse /revivesfull payload:", err);
         return new Response("Bad Request", { status: 400, headers: corsHeaders });
@@ -151,10 +214,7 @@ export default {
 
       if (!result) {
         console.log('[revive-worker] GET miss', { targetId });
-        return new Response(JSON.stringify({ error: "No data found" }), {
-          status: 404,
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
+        return jsonResponse({ error: "No data found" }, 404);
       }
 
       console.log('[revive-worker] GET hit', {
@@ -163,9 +223,7 @@ export default {
         last_updated: result.last_updated,
       });
 
-      return new Response(JSON.stringify(result), {
-        headers: { "Content-Type": "application/json", ...corsHeaders }
-      });
+      return jsonResponse(result);
     }
 
     if (request.method === "POST") {
@@ -201,9 +259,7 @@ export default {
           torn_timestamp,
         });
 
-        return new Response(JSON.stringify({ success: true, targetId, score_total, last_updated: torn_timestamp }), {
-          headers: { "Content-Type": "application/json", ...corsHeaders }
-        });
+        return jsonResponse({ success: true, targetId, score_total, last_updated: torn_timestamp });
       } catch (err) {
         console.error("[revive-worker] Failed to parse revive update payload:", err);
         return new Response("Bad Request", { status: 400, headers: corsHeaders });

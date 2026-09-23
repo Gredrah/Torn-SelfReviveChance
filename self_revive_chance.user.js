@@ -143,8 +143,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     const API_STORAGE_KEY = "monitor_api_key";
     const SKILL_STORAGE_KEY = "monitor_revive_skill";
     const REVIVES_FULL_LAST_PUSH_TS_KEY = "monitor_revives_full_last_push_ts";
+    const PASSIVE_LAST_RUN_TS_KEY = "monitor_passive_last_run_ts";
     const API_KEY_URL = "https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Dragon's Heart Monitor&user=basic,revivesfull,skills";
     const CLOUDFLARE_API_URL = "https://revives.api.gredra.com";
+    const PASSIVE_COLLECTION_INTERVAL_MS = 60 * 60 * 1000;
+    const PASSIVE_COLLECTION_OVERLAP_SECONDS = 300;
     
     let lastSubmittedData = ""; 
 
@@ -165,6 +168,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         GM_deleteValue(API_STORAGE_KEY);
         GM_deleteValue(SKILL_STORAGE_KEY);
         GM_deleteValue(REVIVES_FULL_LAST_PUSH_TS_KEY);
+        GM_deleteValue(PASSIVE_LAST_RUN_TS_KEY);
         alert("Stored API key and revive skill cleared.");
     };
 
@@ -177,6 +181,13 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         const parsedTimestamp = Number(timestamp);
         if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) {
             GM_setValue(REVIVES_FULL_LAST_PUSH_TS_KEY, parsedTimestamp);
+        }
+    };
+    const getStoredLastPassiveRunTimestamp = () => Number(GM_getValue(PASSIVE_LAST_RUN_TS_KEY, 0)) || 0;
+    const setStoredLastPassiveRunTimestamp = (timestamp) => {
+        const parsedTimestamp = Number(timestamp);
+        if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) {
+            GM_setValue(PASSIVE_LAST_RUN_TS_KEY, parsedTimestamp);
         }
     };
 
@@ -292,7 +303,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 return;
             }
             GM_setValue(API_STORAGE_KEY, apiKey);
-            GM_setValue(SKILL_STORAGE_KEY, getSkillLevel(await getSkillLevels(apiKey), 'reviving').level);
+            GM_setValue(SKILL_STORAGE_KEY, getSkillLevel(await getSkillLevels(apiKey), 'reviving'));
         }
         return await checkReviveChance(apiKey);
     };
@@ -396,6 +407,143 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         };
     };
 
+    const computeScoreTotalFromReviveEvents = (events, currentTornTimestamp) => {
+        if (!Array.isArray(events)) throw new TypeError('Expected revive events to be an array.');
+        if (!Number.isFinite(currentTornTimestamp) || currentTornTimestamp <= 0) {
+            throw new TypeError('Expected currentTornTimestamp to be a positive number.');
+        }
+
+        return events.reduce((total, event) => {
+            const reviveTimestamp = Number(event?.revive_timestamp ?? event?.timestamp);
+            if (!Number.isFinite(reviveTimestamp)) return total;
+
+            const elapsedSeconds = currentTornTimestamp - reviveTimestamp;
+            if (elapsedSeconds >= SECONDS_PER_DAY) return total;
+
+            const boundedElapsedSeconds = Math.max(0, elapsedSeconds);
+            const contribution = 1 - (boundedElapsedSeconds / SECONDS_PER_DAY);
+            return total + Math.max(0, Math.min(1, contribution));
+        }, 0);
+    };
+
+    const calculateChanceFromEvents = (events, userSkill, currentTornTimestamp) => {
+        const scoreTotal = computeScoreTotalFromReviveEvents(events, currentTornTimestamp);
+        const chanceBase = 90 + (userSkill / 10);
+        const chanceMultiplier = 8 - (userSkill / 25);
+        let chance = chanceBase - scoreTotal * chanceMultiplier;
+
+        if (!Number.isFinite(chance)) {
+            throw new TypeError('Calculated chance from events is not finite.');
+        }
+
+        chance = Math.max(0, Math.min(100, chance));
+        return {
+            chance,
+            scoreTotal,
+            eventCount: Array.isArray(events) ? events.length : 0,
+        };
+    };
+
+    const fetchTargetReviveEvents = async (targetId, sinceSeconds = SECONDS_PER_DAY, limit = 500) => {
+        const normalizedTargetId = Number.parseInt(targetId, 10);
+        if (!Number.isFinite(normalizedTargetId) || normalizedTargetId <= 0) {
+            throw new TypeError('Invalid targetId for revive events fetch.');
+        }
+
+        const params = new URLSearchParams({
+            since_seconds: String(Math.max(1, Number.parseInt(sinceSeconds, 10) || SECONDS_PER_DAY)),
+            limit: String(Math.max(1, Number.parseInt(limit, 10) || 500)),
+        });
+
+        debugLog('Cloudflare API: fetchTargetReviveEvents | Request Params:', {
+            targetId: normalizedTargetId,
+            since_seconds: params.get('since_seconds'),
+            limit: params.get('limit'),
+        });
+
+        const data = await requestJson(`${CLOUDFLARE_API_URL}/revive-events/target/${normalizedTargetId}?${params.toString()}`);
+        const events = Array.isArray(data?.data) ? data.data : [];
+        debugLog('Cloudflare API: fetchTargetReviveEvents | Events Found:', events.length, '| Target:', normalizedTargetId);
+        return events;
+    };
+
+    const fetchTargetProfileLastActionTimestamp = async (apiKey, targetId) => {
+        const normalizedTargetId = Number.parseInt(targetId, 10);
+        if (!Number.isFinite(normalizedTargetId) || normalizedTargetId <= 0) return null;
+
+        try {
+            const url = `https://api.torn.com/v2/user/${normalizedTargetId}?selections=profile&key=${encodeURIComponent(apiKey)}`;
+            debugLog('Torn API: fetchTargetProfileLastActionTimestamp | Request Target:', normalizedTargetId);
+            const data = await requestJson(url);
+
+            const candidates = [
+                data?.last_action?.timestamp,
+                data?.last_action?.ts,
+                data?.profile?.last_action?.timestamp,
+                data?.profile?.last_action?.ts,
+                data?.last_action,
+            ];
+
+            for (const candidate of candidates) {
+                const parsedTimestamp = Number(candidate);
+                if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) {
+                    debugLog('Torn API: fetchTargetProfileLastActionTimestamp | Parsed last_action:', parsedTimestamp);
+                    return parsedTimestamp;
+                }
+            }
+            debugLog('Torn API: fetchTargetProfileLastActionTimestamp | last_action not found in response.');
+        } catch (error) {
+            debugLog('Torn API: fetchTargetProfileLastActionTimestamp | Failed:', error?.message || error);
+        }
+
+        return null;
+    };
+
+    const getMostRecentReviveTimestamp = (events) => {
+        if (!Array.isArray(events) || events.length === 0) return null;
+        const timestampCandidates = events
+            .map((event) => Number(event?.revive_timestamp ?? event?.timestamp))
+            .filter((timestamp) => Number.isFinite(timestamp) && timestamp > 0);
+        if (timestampCandidates.length === 0) return null;
+        return Math.max(...timestampCandidates);
+    };
+
+    const fetchLegacyEstimateData = (targetId) =>
+        new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: `${CLOUDFLARE_API_URL}/${targetId}`,
+                onload: (response) => {
+                    debugLog(`Cloudflare API: GET /${targetId} | Status:`, response.status);
+                    debugLog(`Cloudflare API: GET /${targetId} | Response Length:`, response.responseText?.length ?? 0);
+                    if (response.status === 404) {
+                        resolve(null);
+                        return;
+                    }
+
+                    try {
+                        const data = JSON.parse(response.responseText);
+                        const scoreTotal = Number(data.score_total);
+                        const lastUpdated = Number(data.last_updated);
+                        if (!Number.isFinite(scoreTotal) || !Number.isFinite(lastUpdated)) {
+                            reject(new TypeError('Database response missing numeric revive data.'));
+                            return;
+                        }
+
+                        debugLog(`Cloudflare API: GET /${targetId} | Parsed Payload:`, {
+                            score_total: scoreTotal,
+                            last_updated: lastUpdated,
+                        });
+
+                        resolve({ scoreTotal, lastUpdated });
+                    } catch (error) {
+                        reject(error);
+                    }
+                },
+                onerror: () => reject(new Error('Failed to connect to legacy estimate endpoint.')),
+            });
+        });
+
     const handleEstimateButtonClick = async () => {
         const targetId = getTargetIdFromDOM();
         debugLog('Event: Estimate Button Clicked | Target:', targetId);
@@ -427,60 +575,130 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         try {
             const timeRes = await getCurrentTimestamp(apiKey);
             const currentTornTimestamp = Number(timeRes?.timestamp);
+            debugLog('Local: handleEstimateButtonClick | Current Torn Timestamp:', currentTornTimestamp);
 
             if (!Number.isFinite(currentTornTimestamp) || currentTornTimestamp <= 0) {
                 alert("Failed to sync with Torn's server clock.");
                 return;
             }
 
-            debugLog('Cloudflare API: Requesting data for Target:', targetId);
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: `${CLOUDFLARE_API_URL}/${targetId}`,
-                onload: (response) => {
-                    debugLog(`Cloudflare API: GET /${targetId} | Status:`, response.status);
-                    debugLog(`Cloudflare API: GET /${targetId} | Response Length:`, response.responseText?.length ?? 0);
-                    
-                    if (response.status === 404) {
-                        alert("No revive data found for this player in the database.");
-                        return;
-                    }
-
-                    try {
-                        const data = JSON.parse(response.responseText);
-                        const scoreTotal = Number(data.score_total);
-                        const lastUpdated = Number(data.last_updated);
-
-                        debugLog(`Cloudflare API: GET /${targetId} | Parsed Payload:`, {
-                            score_total: data.score_total,
-                            last_updated: data.last_updated,
-                        });
-
-                        if (!Number.isFinite(scoreTotal) || !Number.isFinite(lastUpdated)) {
-                            throw new TypeError('Database response missing numeric revive data.');
-                        }
-
-                        debugLog('Cloudflare API: Data retrieved | DB Score:', scoreTotal.toFixed(4));
-                        
-                        const estimate = estimateCurrentChance(scoreTotal, lastUpdated, userSkill, currentTornTimestamp);
-
-                        if (estimate.isFullyDecayed) {
-                            alert(`Target has not been revived in over 24 hours.\n\nEstimated Chance: 100%`);
-                        } else {
-                            alert(
-                                `Estimation Results:\n\n` +
-                                `Estimated Current Chance: ${estimate.chance.toFixed(2)}%\n\n` +
-                                `Data recorded ${estimate.elapsedHours.toFixed(1)} hours ago.\n` +
-                                `*Note: This assumes the slowest possible decay rate. Actual chance may be slightly higher.*`
-                            );
-                        }
-                    } catch (error) {
-                        console.warn("Failed to parse database response.", error);
-                        alert("Failed to parse database response.");
-                    }
-                },
-                onerror: () => alert("Failed to connect to the database.")
+            const legacyDataPromise = fetchLegacyEstimateData(targetId).catch((error) => {
+                debugLog('Cloudflare API: fetchLegacyEstimateData failed during primary path.', error?.message || error);
+                return null;
             });
+
+            try {
+                const events = await fetchTargetReviveEvents(targetId, SECONDS_PER_DAY, 500);
+                const latestReviveTimestamp = getMostRecentReviveTimestamp(events);
+                const targetLastActionTimestamp = await fetchTargetProfileLastActionTimestamp(apiKey, targetId);
+                const legacyDataForSecondary = await legacyDataPromise;
+
+                debugLog('Local: estimate revives_events context | latestReviveTimestamp / targetLastActionTimestamp:', {
+                    latestReviveTimestamp,
+                    targetLastActionTimestamp,
+                    hasLegacyDataForSecondary: !!legacyDataForSecondary,
+                });
+
+                if (events.length === 0) {
+                    let secondarySection = '';
+                    if (legacyDataForSecondary) {
+                        const secondaryEstimate = estimateCurrentChance(
+                            legacyDataForSecondary.scoreTotal,
+                            legacyDataForSecondary.lastUpdated,
+                            userSkill,
+                            currentTornTimestamp
+                        );
+
+                        debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
+                        secondarySection = `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%`;
+                    }
+
+                    debugLog('Local: estimate revives_events | No events in 24h. Returning 100% primary estimate.');
+
+                    alert(
+                        `Estimation Results:\n\n` +
+                        `Estimated Current Chance: 100.00%\n\n` +
+                        `No revive events were recorded for this target in the last 24 hours.\n` +
+                        `Model: revive_events (24h)` +
+                        secondarySection
+                    );
+                    return;
+                }
+
+                const estimate = calculateChanceFromEvents(events, userSkill, currentTornTimestamp);
+                const shouldShowSecondaryLinearDecay =
+                    Number.isFinite(targetLastActionTimestamp) &&
+                    Number.isFinite(latestReviveTimestamp) &&
+                    targetLastActionTimestamp > latestReviveTimestamp &&
+                    !!legacyDataForSecondary;
+
+                debugLog('Local: estimate revives_events | Primary Estimate:', {
+                    chance: estimate.chance,
+                    scoreTotal: estimate.scoreTotal,
+                    eventCount: estimate.eventCount,
+                    shouldShowSecondaryLinearDecay,
+                });
+
+                let secondaryEstimateSection = '';
+                if (shouldShowSecondaryLinearDecay) {
+                    const secondaryEstimate = estimateCurrentChance(
+                        legacyDataForSecondary.scoreTotal,
+                        legacyDataForSecondary.lastUpdated,
+                        userSkill,
+                        currentTornTimestamp
+                    );
+                    debugLog('Local: estimate revives_events | Secondary linear decay estimate appended:', secondaryEstimate.chance.toFixed(2));
+                    secondaryEstimateSection =
+                        `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%` +
+                        `\nCondition: target last action is newer than most recent revive event.`;
+                } else {
+                    debugLog('Local: estimate revives_events | Secondary linear decay estimate not shown.');
+                }
+
+                alert(
+                    `Estimation Results:\n\n` +
+                    `Estimated Current Chance: ${estimate.chance.toFixed(2)}%\n\n` +
+                    `Events used (last 24h): ${estimate.eventCount}\n` +
+                    `Computed Score Total: ${estimate.scoreTotal.toFixed(4)}\n` +
+                    `Model: revive_events (24h)` +
+                    secondaryEstimateSection
+                );
+                return;
+            } catch (eventsError) {
+                debugLog('Cloudflare API: revive_events estimate failed, falling back to legacy aggregate.', eventsError?.message || eventsError);
+            }
+
+            const legacyData = await fetchLegacyEstimateData(targetId);
+            if (!legacyData) {
+                debugLog('Local: estimate fallback | No legacy data found for target:', targetId);
+                alert("No revive data found for this player in the database.");
+                return;
+            }
+
+            const estimate = estimateCurrentChance(
+                legacyData.scoreTotal,
+                legacyData.lastUpdated,
+                userSkill,
+                currentTornTimestamp
+            );
+
+            debugLog('Local: estimate fallback | Legacy aggregate estimate:', {
+                chance: estimate.chance,
+                elapsedHours: estimate.elapsedHours,
+                isFullyDecayed: !!estimate.isFullyDecayed,
+            });
+
+            if (estimate.isFullyDecayed) {
+                alert(`Target has not been revived in over 24 hours.\n\nEstimated Chance: 100%\n\nModel fallback: legacy aggregate`);
+            } else {
+                alert(
+                    `Estimation Results:\n\n` +
+                    `Estimated Current Chance: ${estimate.chance.toFixed(2)}%\n\n` +
+                    `Data recorded ${estimate.elapsedHours.toFixed(1)} hours ago.\n` +
+                    `Model fallback: legacy aggregate\n` +
+                    `*Note: This fallback assumes the slowest possible decay rate. Actual chance may be slightly higher.*`
+                );
+            }
         } catch (error) {
              console.error("Failed to estimate:", error);
         }
@@ -673,6 +891,71 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         }
     };
 
+    const runPassiveRevivesCollection = async (reason = 'interval') => {
+        if (window.__dragonHeartPassiveCollectionInFlight) {
+            debugLog('Passive Collection: skipped because previous run is still in flight.', { reason });
+            return;
+        }
+
+        window.__dragonHeartPassiveCollectionInFlight = true;
+        try {
+            const apiKey = getStoredApiKey();
+            if (!apiKey || !(await isValidApiKey(apiKey))) {
+                debugLog('Passive Collection: skipped due to missing or invalid API key.', { reason });
+                return;
+            }
+
+            const currentTimestampResponse = await getCurrentTimestamp(apiKey);
+            const currentTimestampSeconds = Number(currentTimestampResponse?.timestamp);
+            if (!Number.isFinite(currentTimestampSeconds) || currentTimestampSeconds <= 0) {
+                debugLog('Passive Collection: skipped due to invalid server timestamp.', { reason });
+                return;
+            }
+
+            const lastPushed = getStoredLastRevivesFullPushTimestamp();
+            const fromUnixSeconds = lastPushed > 0
+                ? Math.max(0, lastPushed - PASSIVE_COLLECTION_OVERLAP_SECONDS)
+                : getFromTimestampForLastHours(currentTimestampSeconds, 24);
+
+            const revives = await fetchRevives(apiKey, fromUnixSeconds);
+            await pushRevivesFullToWorker(apiKey, revives, currentTimestampSeconds);
+            setStoredLastPassiveRunTimestamp(currentTimestampSeconds);
+
+            debugLog('Passive Collection: completed.', {
+                reason,
+                fromUnixSeconds,
+                revivesFetched: Array.isArray(revives) ? revives.length : 0,
+            });
+        } catch (error) {
+            debugLog('Passive Collection: failed.', error?.message || error);
+        } finally {
+            window.__dragonHeartPassiveCollectionInFlight = false;
+        }
+    };
+
+    const initializePassiveRevivesCollection = () => {
+        if (window.__dragonHeartPassiveCollectionIntervalId) return;
+
+        debugLog('Passive Collection: scheduler starting (60m interval).');
+        void runPassiveRevivesCollection('startup');
+
+        const intervalId = window.setInterval(() => {
+            void runPassiveRevivesCollection('interval');
+        }, PASSIVE_COLLECTION_INTERVAL_MS);
+
+        window.__dragonHeartPassiveCollectionIntervalId = intervalId;
+
+        window.addEventListener('visibilitychange', () => {
+            if (document.visibilityState !== 'visible') return;
+
+            const lastRunTimestamp = getStoredLastPassiveRunTimestamp();
+            const nowUnixSeconds = Math.floor(Date.now() / 1000);
+            if (!lastRunTimestamp || nowUnixSeconds - lastRunTimestamp >= PASSIVE_COLLECTION_INTERVAL_MS / 1000) {
+                void runPassiveRevivesCollection('visibility-resume');
+            }
+        });
+    };
+
     const getTargetIdFromDOM = () => {
         const params = new URLSearchParams(window.location.search);
         if (params.has('XID')) return params.get('XID');
@@ -749,4 +1032,5 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     addMonitorButton();
     addEstimateButton();
     watchForReviveDialog();
+    initializePassiveRevivesCollection();
 })();
