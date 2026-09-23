@@ -43,32 +43,48 @@ function annotateRevivesWithAge(revives, currentTimestamp) {
 }
 
 async function getSkillLevels(apiKey) {
-    const data = await requestJson(`https://api.torn.com/user/?selections=skills&key=${encodeURIComponent(apiKey)}`);
+    const url = `https://api.torn.com/v2/user/?selections=skills&key=${encodeURIComponent(apiKey)}`;
+    const data = await requestJson(url);
+    if (data?.error) throw new Error(`Torn API error: ${JSON.stringify(data.error)}`);
+
     const skills = data.skills;
-    if (!skills) throw new Error("Failed to retrieve skills from API response.");
+    if (!Array.isArray(skills)) throw new Error("Failed to retrieve skills from API response.");
+
+    debugLog('Torn API: getSkillLevels | Total Skills Fetched:', skills.length);
     return skills;
 }
 
 function getSkillLevel(skills, skillName) {
     if (!skills || !Array.isArray(skills)) throw new TypeError("Invalid skills object. Expected an array.");
-    const skill = skills.find(s => s.slug === skillName.toLowerCase());
+    const skill = skills.find(s => s.slug === skillName.toLowerCase() || (s.name && s.name.toLowerCase() === skillName.toLowerCase()));
     if (!skill) throw new Error(`Skill "${skillName}" not found in skills object.`);
+    debugLog('Local: getSkillLevel | Extracted Skill:', skill.level);
     return skill.level;
 }
 
 // util/api.js
 async function requestJson(url) {
+    // Strips the API key from the URL for cleaner console logging
+    const safeUrl = url.split('&key=')[0].split('?key=')[0]; 
+    
     return new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
             method: 'GET',
             url,
             responseType: 'text',
             onload: (response) => {
+                debugLog(`Network: GET ${safeUrl} | Status:`, response.status);
                 try { resolve(JSON.parse(response.responseText)); } 
                 catch (error) { reject(error); }
             },
-            onerror: () => reject(new Error('Request failed')),
-            ontimeout: () => reject(new Error('Request timed out')),
+            onerror: () => {
+                debugLog(`Network: GET ${safeUrl} | Status: FAILED`);
+                reject(new Error('Request failed'));
+            },
+            ontimeout: () => {
+                debugLog(`Network: GET ${safeUrl} | Status: TIMEOUT`);
+                reject(new Error('Request timed out'));
+            }
         });
     });
 }
@@ -78,23 +94,25 @@ async function isValidApiKey(apiKey) {
     try {
         const url = `https://api.torn.com/user/?selections=basic&key=${encodeURIComponent(apiKey.trim())}`;
         const data = await requestJson(url);
-        return data?.error === undefined || data?.error === 0 || data?.error === '0';
+        const isValid = data?.error === undefined || data?.error === 0 || data?.error === '0';
+        debugLog('Torn API: isValidApiKey | Result:', isValid);
+        return isValid;
     } catch {
         return false;
     }
 }
 
 async function getCurrentTimestamp(apiKey) {
-    debugLog('Requesting current timestamp (public v2 endpoint).');
-    const publicResponse = await requestJson('https://api.torn.com/v2/torn/timestamp');
-    if (Number.isFinite(Number(publicResponse?.timestamp))) return publicResponse;
+    let response = await requestJson('https://api.torn.com/v2/torn/timestamp');
+    
+    const isKeyRelatedPublicError = typeof response?.error?.error === 'string' && /incorrect key|key/i.test(response.error.error);
 
-    const publicError = publicResponse?.error;
-    const isKeyRelatedPublicError = typeof publicError?.error === 'string' && /incorrect key|key/i.test(publicError.error);
+    if (apiKey && isKeyRelatedPublicError) {
+        response = await requestJson(`https://api.torn.com/v2/torn/timestamp?key=${encodeURIComponent(apiKey)}`);
+    }
 
-    if (!apiKey || !isKeyRelatedPublicError) return publicResponse;
-
-    return await requestJson(`https://api.torn.com/v2/torn/timestamp?key=${encodeURIComponent(apiKey)}`);
+    debugLog('Torn API: getCurrentTimestamp | Time:', response?.timestamp || 'Failed');
+    return response;
 }
 
 // util/revives.js
@@ -108,9 +126,12 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     if (data?.error) throw new Error(`Failed to retrieve revives: ${data.error.error || 'Unknown API error'}`);
 
     const revivesPayload = data?.revives ?? data?.revivesFull ?? data?.revivesfull;
-    if (Array.isArray(revivesPayload)) return revivesPayload;
-    if (revivesPayload && typeof revivesPayload === 'object') return Object.values(revivesPayload);
-    return [];
+    let revivesArray = [];
+    if (Array.isArray(revivesPayload)) revivesArray = revivesPayload;
+    else if (revivesPayload && typeof revivesPayload === 'object') revivesArray = Object.values(revivesPayload);
+    
+    debugLog('Torn API: fetchRevives | Revives Found:', revivesArray.length);
+    return revivesArray;
 }
 
 (function() {
@@ -125,6 +146,43 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
     const getStoredApiKey = () => GM_getValue(API_STORAGE_KEY, null);
     const generateApiKey = () => window.open(API_KEY_URL, "_blank", "noopener,noreferrer");
+
+    // Ensure the user's revive skill is stored. Try API first, then prompt manual entry.
+    async function ensureUserSkillSaved() {
+        let stored = GM_getValue(SKILL_STORAGE_KEY, null);
+        if (stored !== null) return stored;
+
+        const apiKey = getStoredApiKey();
+        if (apiKey && await isValidApiKey(apiKey)) {
+            try {
+                const skills = await getSkillLevels(apiKey);
+                const lvl = getSkillLevel(skills, 'reviving');
+                GM_setValue(SKILL_STORAGE_KEY, lvl);
+                debugLog('Local: ensureUserSkillSaved | Stored skill from API:', lvl);
+                return lvl;
+            } catch (err) {
+                debugLog('Local: ensureUserSkillSaved | Failed to fetch skill via API:', err);
+            }
+        }
+
+        // Prompt for manual entry if API fetch didn't work or no API key present
+        try {
+            const entry = prompt('Enter your revive skill level (1-100) to store for Dragon\'s Heart Monitor. Leave blank to skip.');
+            if (entry === null) return null;
+            if (!entry.trim()) return null;
+            const val = Number.parseFloat(entry);
+            if (Number.isNaN(val) || val < 0 || val > 100) {
+                alert('Invalid skill level. Not saved.');
+                return null;
+            }
+            GM_setValue(SKILL_STORAGE_KEY, val);
+            debugLog('Local: ensureUserSkillSaved | Stored manual skill:', val);
+            return val;
+        } catch (err) {
+            debugLog('Local: ensureUserSkillSaved | Manual entry failed:', err);
+            return null;
+        }
+    }
 
     const checkReviveChance = async (apiKey) => {
         let reviveSkillInput = prompt("Enter the reviver's skill level (1-100). Leave blank to assume 100.");
@@ -159,6 +217,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
             const reviveChance = 90 + (reviveSkill / 10) - scoreTotal * (8 - (reviveSkill / 25));
 
+            debugLog('Local: checkReviveChance | Calculated Chance:', reviveChance.toFixed(2) + '%');
             alert(`Your current revive chance is approximately: ${reviveChance.toFixed(2)}%\n\nThis is based on your recent revives in the last 24 hours and the reviver's skill level you provided: ${reviveSkill}.`);
 
         } catch (error) {
@@ -167,6 +226,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     }
         
     const handleMonitorButtonClick = async () => {
+        debugLog('Event: Monitor Button Clicked');
         let apiKey = getStoredApiKey();
 
         if (!apiKey || !(await isValidApiKey(apiKey))) {
@@ -215,7 +275,6 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     };
 
     const addMonitorButton = () => {
-        // Gate check: Only render on Hospital View
         if (!window.location.href.includes('hospitalview.php')) return;
 
         const linksWrap = document.querySelector('.content-title-links');
@@ -263,8 +322,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.style.clear = 'left';
         button.style.marginRight = '8px';
 
-        button.addEventListener('mouseenter', () => button.style.background = 'rgba(210, 45, 45, 0.8)');
-        button.addEventListener('mouseleave', () => button.style.background = redBase);
+        button.addEventListener('mouseenter', () => { button.style.background = 'rgba(210, 45, 45, 0.8)'; });
+        button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleMonitorButtonClick);
 
         linksWrap.insertBefore(button, linksWrap.firstChild);
@@ -274,9 +333,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     // ESTIMATION PIPELINE: Estimate Target Chance
     // ==========================================
 
-    const estimateCurrentChance = (dbScoreTotal, dbTimestamp, userSkill) => {
-        const now = Math.floor(Date.now() / 1000);
-        const elapsedSeconds = now - dbTimestamp;
+    const estimateCurrentChance = (dbScoreTotal, dbTimestamp, userSkill, currentTornTimestamp) => {
+        const elapsedSeconds = currentTornTimestamp - dbTimestamp;
 
         if (elapsedSeconds >= SECONDS_PER_DAY) {
             return { chance: 100.00, isFullyDecayed: true };
@@ -295,16 +353,24 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         
         if (estimatedChance > 100) estimatedChance = 100;
 
+        debugLog('Local: estimateCurrentChance | Result:', estimatedChance.toFixed(2) + '%');
         return {
             chance: estimatedChance,
             elapsedHours: (elapsedSeconds / 3600)
         };
     };
 
-    const handleEstimateButtonClick = () => {
+    const handleEstimateButtonClick = async () => {
         const targetId = getTargetIdFromDOM();
+        debugLog('Event: Estimate Button Clicked | Target:', targetId);
         if (!targetId) {
             alert("Could not identify the player ID from this page.");
+            return;
+        }
+
+        let apiKey = getStoredApiKey();
+        if (!apiKey || !(await isValidApiKey(apiKey))) {
+            alert("You need a valid API key to synchronize with Torn's server clock. Please use the 'Check Revive Chance' button on the Hospital page to set one up first.");
             return;
         }
 
@@ -323,39 +389,56 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             }
         }
 
-        GM_xmlhttpRequest({
-            method: "GET",
-            url: `${CLOUDFLARE_API_URL}/${targetId}`,
-            onload: (response) => {
-                if (response.status === 404) {
-                    alert("No revive data found for this player in the database.");
-                    return;
-                }
+        try {
+            const timeRes = await getCurrentTimestamp(apiKey);
+            const currentTornTimestamp = Number(timeRes?.timestamp);
 
-                try {
-                    const data = JSON.parse(response.responseText);
-                    const estimate = estimateCurrentChance(data.score_total, data.last_updated, userSkill);
+            if (!Number.isFinite(currentTornTimestamp) || currentTornTimestamp <= 0) {
+                alert("Failed to sync with Torn's server clock.");
+                return;
+            }
 
-                    if (estimate.isFullyDecayed) {
-                        alert(`Target has not been revived in over 24 hours.\n\nEstimated Chance: 100%`);
-                    } else {
-                        alert(
-                            `Estimation Results:\n\n` +
-                            `Estimated Current Chance: ${estimate.chance.toFixed(2)}%\n\n` +
-                            `Data recorded ${estimate.elapsedHours.toFixed(1)} hours ago.\n` +
-                            `*Note: This assumes the slowest possible decay rate. Actual chance may be slightly higher.*`
-                        );
+            debugLog('Cloudflare API: Requesting data for Target:', targetId);
+            GM_xmlhttpRequest({
+                method: "GET",
+                url: `${CLOUDFLARE_API_URL}/${targetId}`,
+                onload: (response) => {
+                    debugLog(`Cloudflare API: GET /${targetId} | Status:`, response.status);
+                    
+                    if (response.status === 404) {
+                        alert("No revive data found for this player in the database.");
+                        return;
                     }
-                } catch (e) {
-                    alert("Failed to parse database response.");
-                }
-            },
-            onerror: () => alert("Failed to connect to the database.")
-        });
+
+                    try {
+                        const data = JSON.parse(response.responseText);
+                        debugLog('Cloudflare API: Data retrieved | DB Score:', data.score_total.toFixed(4));
+                        
+                        const estimate = estimateCurrentChance(data.score_total, data.last_updated, userSkill, currentTornTimestamp);
+
+                        if (estimate.isFullyDecayed) {
+                            alert(`Target has not been revived in over 24 hours.\n\nEstimated Chance: 100%`);
+                        } else {
+                            alert(
+                                `Estimation Results:\n\n` +
+                                `Estimated Current Chance: ${estimate.chance.toFixed(2)}%\n\n` +
+                                `Data recorded ${estimate.elapsedHours.toFixed(1)} hours ago.\n` +
+                                `*Note: This assumes the slowest possible decay rate. Actual chance may be slightly higher.*`
+                            );
+                        }
+                    } catch (error) {
+                        console.warn("Failed to parse database response.", error);
+                        alert("Failed to parse database response.");
+                    }
+                },
+                onerror: () => alert("Failed to connect to the database.")
+            });
+        } catch (error) {
+             console.error("Failed to estimate:", error);
+        }
     };
 
     const addEstimateButton = () => {
-        // Gate check: Only render on Profiles View
         if (!window.location.href.includes('profiles.php')) return;
 
         const linksWrap = document.querySelector('.content-title-links');
@@ -369,7 +452,6 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.type = 'button';
         button.setAttribute('aria-label', 'Estimate revive chance');
 
-        // Added responsive sizing logic similar to Monitor button
         const setButtonLabel = () => {
             const mobile = window.matchMedia('(max-width: 768px)').matches;
             button.textContent = mobile ? '🐲' : '🐲Estimate Revive Chance🐲';
@@ -402,8 +484,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.style.clear = 'left';
         button.style.marginRight = '8px';
 
-        button.addEventListener('mouseenter', () => button.style.background = 'rgba(210, 45, 45, 0.8)');
-        button.addEventListener('mouseleave', () => button.style.background = redBase);
+        button.addEventListener('mouseenter', () => { button.style.background = 'rgba(210, 45, 45, 0.8)'; });
+        button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleEstimateButtonClick);
 
         linksWrap.insertBefore(button, linksWrap.firstChild);
@@ -413,20 +495,20 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     // COLLECTION PIPELINE: Worker API push logic
     // ==========================================
 
-    const pushReviveDataToWorker = (targetId, scoreTotal) => {
+    const pushReviveDataToWorker = (targetId, scoreTotal, tornTimestamp) => {
         const endpoint = `${CLOUDFLARE_API_URL}/${targetId}`;
-        debugLog(`Pushing revive data to worker: ID ${targetId} at score ${scoreTotal}`);
+        debugLog('Cloudflare API: Pushing revive data | Target:', targetId);
 
         GM_xmlhttpRequest({
             method: "POST",
             url: endpoint,
             headers: { "Content-Type": "application/json" },
-            data: JSON.stringify({ score_total: scoreTotal }),
+            data: JSON.stringify({ score_total: scoreTotal, torn_timestamp: tornTimestamp }),
             onload: (response) => {
-                debugLog(`Worker response for ${targetId}:`, response.responseText);
+                debugLog(`Cloudflare API: POST /${targetId} | Status:`, response.status);
             },
-            onerror: (error) => {
-                console.error(`[Dragon's Heart Monitor] Failed to push data for ${targetId}:`, error);
+            onerror: () => {
+                debugLog(`Cloudflare API: POST /${targetId} | Status: FAILED`);
             }
         });
     };
@@ -445,32 +527,56 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     };
 
     const watchForReviveDialog = () => {
-        const observer = new MutationObserver((mutations) => {
+        const observer = new MutationObserver(async (mutations) => {
             for (const mutation of mutations) {
                 if (mutation.addedNodes.length) {
                     const dialogTextElement = document.querySelector('.profile-buttons-dialog .text');
                     
                     if (dialogTextElement) {
-                        const match = dialogTextElement.textContent.match(/has a ([\d.]+)% chance/);
+                        const match = new RegExp(/has a ([\d.]+)% chance/).exec(dialogTextElement.textContent);
                         
                         if (match) {
-                            const chance = parseFloat(match[1]);
+                            const chance = Number.parseFloat(match[1]);
                             const targetId = getTargetIdFromDOM();
                             
-                            if (targetId && !isNaN(chance)) {
+                            if (targetId && !Number.isNaN(chance)) {
                                 const currentDataHash = `${targetId}-${chance}`;
                                 
                                 if (lastSubmittedData !== currentDataHash) {
                                     lastSubmittedData = currentDataHash;
+                                    debugLog('Event: Revive Dialog Detected | Intercepted Chance:', chance + '%');
 
-                                    const mySkill = GM_getValue(SKILL_STORAGE_KEY, 100);
+                                    const apiKey = getStoredApiKey();
+                                    if (!apiKey) return;
+
+                                    let mySkill = GM_getValue(SKILL_STORAGE_KEY, null);
+                                    if (mySkill === null) {
+                                        debugLog('Local: Missing saved user skill. Attempting to ensure saved.');
+                                        await ensureUserSkillSaved();
+                                        mySkill = GM_getValue(SKILL_STORAGE_KEY, null);
+                                        if (mySkill === null) {
+                                            debugLog("Collection Aborted | Reason: No saved user skill after attempt");
+                                            return;
+                                        }
+                                    }
                                     
                                     const skillBase = 90 + (mySkill / 10);
                                     const skillMultiplier = 8 - (mySkill / 25);
                                     let exactScoreTotal = (skillBase - chance) / skillMultiplier;
                                     if (exactScoreTotal < 0) exactScoreTotal = 0;
+                                    
+                                    debugLog('Local: Collection Math | Universal Score:', exactScoreTotal.toFixed(4));
 
-                                    pushReviveDataToWorker(targetId, exactScoreTotal);
+                                    try {
+                                        const timeRes = await getCurrentTimestamp(apiKey);
+                                        const tornTimestamp = Number(timeRes?.timestamp);
+                                        
+                                        if (tornTimestamp > 0) {
+                                            pushReviveDataToWorker(targetId, exactScoreTotal, tornTimestamp);
+                                        }
+                                    } catch (err) {
+                                        // Intentionally ignored: a timestamp fetch failure should not block local collection.
+                                    }
                                 }
                             }
                         }
@@ -482,6 +588,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     };
 
     // Initialize 
+    // Ensure user's revive skill is stored proactively on page load
+    ensureUserSkillSaved();
     addMonitorButton();
     addEstimateButton();
     watchForReviveDialog();
