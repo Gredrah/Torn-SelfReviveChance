@@ -4,7 +4,7 @@
 // @namespace    https://www.github.com/gredrah/
 //
 // @version      1.1.2
-// @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for each player in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
+// @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
 // @license      UNLICENSE
@@ -142,6 +142,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
     const API_STORAGE_KEY = "monitor_api_key";
     const SKILL_STORAGE_KEY = "monitor_revive_skill";
+    const REVIVES_FULL_LAST_PUSH_TS_KEY = "monitor_revives_full_last_push_ts";
     const API_KEY_URL = "https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Dragon's Heart Monitor&user=basic,revivesfull,skills";
     const CLOUDFLARE_API_URL = "https://revives.api.gredra.com";
     
@@ -163,12 +164,21 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     const clearAllStoredData = () => {
         GM_deleteValue(API_STORAGE_KEY);
         GM_deleteValue(SKILL_STORAGE_KEY);
+        GM_deleteValue(REVIVES_FULL_LAST_PUSH_TS_KEY);
         alert("Stored API key and revive skill cleared.");
     };
 
     GM_registerMenuCommand("Clear stored API key", clearStoredApiKey);
     GM_registerMenuCommand("Clear stored revive skill", clearStoredSkill);
     GM_registerMenuCommand("Clear all Dragon's Heart Monitor data", clearAllStoredData);
+
+    const getStoredLastRevivesFullPushTimestamp = () => Number(GM_getValue(REVIVES_FULL_LAST_PUSH_TS_KEY, 0)) || 0;
+    const setStoredLastRevivesFullPushTimestamp = (timestamp) => {
+        const parsedTimestamp = Number(timestamp);
+        if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) {
+            GM_setValue(REVIVES_FULL_LAST_PUSH_TS_KEY, parsedTimestamp);
+        }
+    };
 
     const promptForUserSkill = (storedSkill, promptText) => {
         const hasStoredSkill = Number.isFinite(storedSkill);
@@ -220,6 +230,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
             const twentyFourHoursAgoTimestamp = getFromTimestampForLastHours(currentTimestampSeconds, 24);
             const revives = await fetchRevives(apiKey, twentyFourHoursAgoTimestamp);
+            void pushRevivesFullToWorker(apiKey, revives, currentTimestampSeconds);
 
             const annotatedRevives = annotateRevivesWithAge(revives, currentTimestampSeconds);
             
@@ -557,6 +568,109 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 debugLog(`Cloudflare API: POST /${targetId} | Status: FAILED`);
             }
         });
+    };
+
+    const extractReviveId = (revive, fallbackId = null) => {
+        const candidate = revive?.revive_id ?? revive?.id ?? fallbackId;
+        const parsedCandidate = Number.parseInt(candidate, 10);
+        if (Number.isFinite(parsedCandidate) && parsedCandidate > 0) return parsedCandidate;
+        return null;
+    };
+
+    const extractReviveTimestamp = (revive) => {
+        const parsedTimestamp = Number.parseInt(revive?.timestamp, 10);
+        if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) return parsedTimestamp;
+        return null;
+    };
+
+    const normalizeRevivesForUpload = (revives, sourceUserId = null) => {
+        if (!Array.isArray(revives)) return [];
+
+        return revives
+            .map((revive, index) => {
+                const fallbackId = Number.isFinite(index) ? index + 1 : null;
+                const reviveId = extractReviveId(revive, fallbackId);
+                const reviveTimestamp = extractReviveTimestamp(revive);
+                if (!reviveId || !reviveTimestamp) return null;
+
+                return {
+                    ...revive,
+                    revive_id: reviveId,
+                    timestamp: reviveTimestamp,
+                    source_user_id: sourceUserId,
+                };
+            })
+            .filter(Boolean);
+    };
+
+    const pushRevivesFullToWorker = async (apiKey, revives, pulledAtTimestamp) => {
+        const normalizedRevives = normalizeRevivesForUpload(revives);
+        if (normalizedRevives.length === 0) {
+            debugLog('Cloudflare API: revivesFull push skipped (no valid revives).');
+            return;
+        }
+
+        const latestReviveTimestamp = normalizedRevives.reduce(
+            (maxTimestamp, revive) => Math.max(maxTimestamp, Number(revive.timestamp) || 0),
+            0
+        );
+
+        const lastPushedTimestamp = getStoredLastRevivesFullPushTimestamp();
+        const newRevives = normalizedRevives.filter((revive) => Number(revive.timestamp) > lastPushedTimestamp);
+
+        if (newRevives.length === 0) {
+            debugLog('Cloudflare API: revivesFull push skipped (no new revives).', {
+                lastPushedTimestamp,
+                latestReviveTimestamp,
+            });
+            return;
+        }
+
+        try {
+            const sourceProfile = await requestJson(`https://api.torn.com/v2/user/?selections=profile&key=${encodeURIComponent(apiKey)}`);
+            const sourceUserId = Number.parseInt(sourceProfile?.player_id ?? sourceProfile?.profile?.player_id, 10);
+
+            const payload = {
+                pulled_at: Number(pulledAtTimestamp),
+                source_user_id: Number.isFinite(sourceUserId) ? sourceUserId : null,
+                revives: newRevives.map((revive) => ({
+                    ...revive,
+                    source_user_id: Number.isFinite(sourceUserId) ? sourceUserId : null,
+                })),
+            };
+
+            await new Promise((resolve) => {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: `${CLOUDFLARE_API_URL}/revivesfull`,
+                    headers: { 'Content-Type': 'application/json' },
+                    data: JSON.stringify(payload),
+                    onload: (response) => {
+                        debugLog('Cloudflare API: POST /revivesfull | Status:', response.status);
+                        if (response.status >= 200 && response.status < 300) {
+                            setStoredLastRevivesFullPushTimestamp(latestReviveTimestamp);
+                            debugLog('Cloudflare API: revivesFull push complete.', {
+                                sentCount: payload.revives.length,
+                                latestReviveTimestamp,
+                            });
+                        } else {
+                            debugLog('Cloudflare API: revivesFull push failed with non-2xx response.', response.responseText);
+                        }
+                        resolve();
+                    },
+                    onerror: () => {
+                        debugLog('Cloudflare API: POST /revivesfull | Status: FAILED');
+                        resolve();
+                    },
+                    ontimeout: () => {
+                        debugLog('Cloudflare API: POST /revivesfull | Status: TIMEOUT');
+                        resolve();
+                    },
+                });
+            });
+        } catch (error) {
+            debugLog('Cloudflare API: revivesFull push aborted due to preparation error.', error?.message || error);
+        }
     };
 
     const getTargetIdFromDOM = () => {
