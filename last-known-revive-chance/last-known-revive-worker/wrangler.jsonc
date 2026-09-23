@@ -1,0 +1,14 @@
+{
+  "name": "last-known-revive-worker",
+  "main": "src/index.js",
+  "compatibility_date": "2023-10-30",
+
+  // Add this array to bind your D1 database to the 'DB' variable
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "last-known-revive-chance",
+      "database_id": "f1f65da7-aeab-40ba-b359-9ecb9ef84df2"
+    }
+  ]
+}
