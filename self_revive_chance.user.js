@@ -178,7 +178,6 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         const apiKey = getStoredApiKey();
         if (apiKey && await isValidApiKey(apiKey)) {
             try {
-                const skills = await getSkillLevels(apiKey);
                 const reviveSkillLevel = getSkillLevel(await getSkillLevels(apiKey), 'reviving');
                 GM_setValue(SKILL_STORAGE_KEY, reviveSkillLevel);
                 debugLog('Local: ensureUserSkillSaved | Stored skill from API:', reviveSkillLevel);
@@ -274,7 +273,6 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                         }
                         const reviveSkillLevel = getSkillLevel(await getSkillLevels(apiKey), 'reviving');
                         GM_setValue(SKILL_STORAGE_KEY, reviveSkillLevel);
-                        GM_setValue(SKILL_STORAGE_KEY, getSkillLevel(await getSkillLevels(apiKey), 'reviving').level);
                         await checkReviveChance(apiKey);
                     };
 
@@ -358,24 +356,37 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     // ==========================================
 
     const estimateCurrentChance = (dbScoreTotal, dbTimestamp, userSkill, currentTornTimestamp) => {
-        const elapsedSeconds = currentTornTimestamp - dbTimestamp;
+        const scoreTotal = Number(dbScoreTotal);
+        const updatedTimestamp = Number(dbTimestamp);
+        const skillLevel = Number(userSkill);
+
+        if (!Number.isFinite(scoreTotal) || !Number.isFinite(updatedTimestamp) || !Number.isFinite(skillLevel)) {
+            throw new TypeError('Invalid database data for revive chance estimation.');
+        }
+
+        const elapsedSeconds = currentTornTimestamp - updatedTimestamp;
 
         if (elapsedSeconds >= SECONDS_PER_DAY) {
             return { chance: 100.00, isFullyDecayed: true };
         }
 
-        let n = Math.ceil(dbScoreTotal);
+        let n = Math.ceil(scoreTotal);
         if (n === 0) n = 1;
 
         const decayAmount = n * (elapsedSeconds / SECONDS_PER_DAY);
-        let currentScoreTotal = dbScoreTotal - decayAmount;
+        let currentScoreTotal = scoreTotal - decayAmount;
         if (currentScoreTotal < 0) currentScoreTotal = 0;
 
-        const userSkillBase = 90 + (userSkill / 10);
-        const userSkillMultiplier = 8 - (userSkill / 25);
+        const userSkillBase = 90 + (skillLevel / 10);
+        const userSkillMultiplier = 8 - (skillLevel / 25);
         let estimatedChance = userSkillBase - (currentScoreTotal * userSkillMultiplier);
         
+        if (!Number.isFinite(estimatedChance)) {
+            throw new TypeError('Calculated revive chance is not a finite number.');
+        }
+
         if (estimatedChance > 100) estimatedChance = 100;
+        if (estimatedChance < 0) estimatedChance = 0;
 
         debugLog('Local: estimateCurrentChance | Result:', estimatedChance.toFixed(2) + '%');
         return {
@@ -428,6 +439,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 url: `${CLOUDFLARE_API_URL}/${targetId}`,
                 onload: (response) => {
                     debugLog(`Cloudflare API: GET /${targetId} | Status:`, response.status);
+                    debugLog(`Cloudflare API: GET /${targetId} | Response Length:`, response.responseText?.length ?? 0);
                     
                     if (response.status === 404) {
                         alert("No revive data found for this player in the database.");
@@ -436,9 +448,21 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
                     try {
                         const data = JSON.parse(response.responseText);
-                        debugLog('Cloudflare API: Data retrieved | DB Score:', data.score_total.toFixed(4));
+                        const scoreTotal = Number(data.score_total);
+                        const lastUpdated = Number(data.last_updated);
+
+                        debugLog(`Cloudflare API: GET /${targetId} | Parsed Payload:`, {
+                            score_total: data.score_total,
+                            last_updated: data.last_updated,
+                        });
+
+                        if (!Number.isFinite(scoreTotal) || !Number.isFinite(lastUpdated)) {
+                            throw new TypeError('Database response missing numeric revive data.');
+                        }
+
+                        debugLog('Cloudflare API: Data retrieved | DB Score:', scoreTotal.toFixed(4));
                         
-                        const estimate = estimateCurrentChance(data.score_total, data.last_updated, userSkill, currentTornTimestamp);
+                        const estimate = estimateCurrentChance(scoreTotal, lastUpdated, userSkill, currentTornTimestamp);
 
                         if (estimate.isFullyDecayed) {
                             alert(`Target has not been revived in over 24 hours.\n\nEstimated Chance: 100%`);
@@ -530,6 +554,15 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             data: JSON.stringify({ score_total: scoreTotal, torn_timestamp: tornTimestamp }),
             onload: (response) => {
                 debugLog(`Cloudflare API: POST /${targetId} | Status:`, response.status);
+                debugLog(`Cloudflare API: POST /${targetId} | Response Length:`, response.responseText?.length ?? 0);
+
+                const responseBody = response.responseText ?? '';
+                if (responseBody.trim().startsWith('{')) {
+                    const payload = JSON.parse(responseBody);
+                    debugLog(`Cloudflare API: POST /${targetId} | Parsed Response:`, payload);
+                } else {
+                    debugLog(`Cloudflare API: POST /${targetId} | Non-JSON Response:`, response.responseText);
+                }
             },
             onerror: () => {
                 debugLog(`Cloudflare API: POST /${targetId} | Status: FAILED`);

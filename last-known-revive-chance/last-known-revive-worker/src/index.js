@@ -6,6 +6,8 @@ const corsHeaders = {
 
 export default {
   async fetch(request, env) {
+    console.log(`[revive-worker] ${request.method} ${new URL(request.url).pathname}`);
+
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: corsHeaders });
     }
@@ -25,12 +27,25 @@ export default {
         "SELECT score_total, last_updated FROM revives WHERE target_id = ?"
       ).bind(targetId).first();
 
+      console.log('[revive-worker] GET lookup', {
+        targetId,
+        found: !!result,
+        result,
+      });
+
       if (!result) {
+        console.log('[revive-worker] GET miss', { targetId });
         return new Response(JSON.stringify({ error: "No data found" }), {
           status: 404,
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });
       }
+
+      console.log('[revive-worker] GET hit', {
+        targetId,
+        score_total: result.score_total,
+        last_updated: result.last_updated,
+      });
 
       return new Response(JSON.stringify(result), {
         headers: { "Content-Type": "application/json", ...corsHeaders }
@@ -49,6 +64,12 @@ export default {
            return new Response("Invalid torn_timestamp value", { status: 400, headers: corsHeaders });
         }
 
+        console.log('[revive-worker] POST payload', {
+          targetId,
+          score_total,
+          torn_timestamp,
+        });
+
         // UPSERT using Torn's exact time instead of Cloudflare's time
         await env.DB.prepare(`
           INSERT INTO revives (target_id, score_total, last_updated)
@@ -58,11 +79,17 @@ export default {
             last_updated = excluded.last_updated
         `).bind(targetId, score_total, torn_timestamp).run();
 
+        console.log('[revive-worker] POST upsert complete', {
+          targetId,
+          score_total,
+          torn_timestamp,
+        });
+
         return new Response(JSON.stringify({ success: true, targetId, score_total, last_updated: torn_timestamp }), {
           headers: { "Content-Type": "application/json", ...corsHeaders }
         });
       } catch (err) {
-        console.error("Failed to parse revive update payload:", err);
+        console.error("[revive-worker] Failed to parse revive update payload:", err);
         return new Response("Bad Request", { status: 400, headers: corsHeaders });
       }
     }
