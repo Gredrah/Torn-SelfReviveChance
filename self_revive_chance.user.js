@@ -12,7 +12,9 @@
 // @grant GM_xmlhttpRequest
 // @grant GM_getValue
 // @grant GM_setValue
-// @connect api.gredra.com
+// @grant GM_registerMenuCommand
+// @grant GM_deleteValue
+// @connect revives.api.gredra.com
 // @connect api.torn.com
 // ==/UserScript==
 
@@ -148,6 +150,26 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     const getStoredApiKey = () => GM_getValue(API_STORAGE_KEY, null);
     const generateApiKey = () => window.open(API_KEY_URL, "_blank", "noopener,noreferrer");
 
+    const clearStoredApiKey = () => {
+    GM_deleteValue(API_STORAGE_KEY);
+    alert("Stored API key cleared.");
+    };
+
+    const clearStoredSkill = () => {
+        GM_deleteValue(SKILL_STORAGE_KEY);
+        alert("Stored revive skill cleared.");
+    };
+
+    const clearAllStoredData = () => {
+        GM_deleteValue(API_STORAGE_KEY);
+        GM_deleteValue(SKILL_STORAGE_KEY);
+        alert("Stored API key and revive skill cleared.");
+    };
+
+    GM_registerMenuCommand("Clear stored API key", clearStoredApiKey);
+    GM_registerMenuCommand("Clear stored revive skill", clearStoredSkill);
+    GM_registerMenuCommand("Clear all Dragon's Heart Monitor data", clearAllStoredData);
+
     // Ensure the user's revive skill is stored. Try API first, then prompt manual entry.
     async function ensureUserSkillSaved() {
         let stored = GM_getValue(SKILL_STORAGE_KEY, null);
@@ -157,10 +179,10 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         if (apiKey && await isValidApiKey(apiKey)) {
             try {
                 const skills = await getSkillLevels(apiKey);
-                const lvl = getSkillLevel(skills, 'reviving');
-                GM_setValue(SKILL_STORAGE_KEY, lvl);
-                debugLog('Local: ensureUserSkillSaved | Stored skill from API:', lvl);
-                return lvl;
+                const reviveSkillLevel = getSkillLevel(await getSkillLevels(apiKey), 'reviving');
+                GM_setValue(SKILL_STORAGE_KEY, reviveSkillLevel);
+                debugLog('Local: ensureUserSkillSaved | Stored skill from API:', reviveSkillLevel);
+                return reviveSkillLevel;
             } catch (err) {
                 debugLog('Local: ensureUserSkillSaved | Failed to fetch skill via API:', err);
             }
@@ -250,7 +272,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                             alert("That API key is invalid.");
                             return;
                         }
-                        GM_setValue(API_STORAGE_KEY, apiKey);
+                        const reviveSkillLevel = getSkillLevel(await getSkillLevels(apiKey), 'reviving');
+                        GM_setValue(SKILL_STORAGE_KEY, reviveSkillLevel);
                         GM_setValue(SKILL_STORAGE_KEY, getSkillLevel(await getSkillLevels(apiKey), 'reviving').level);
                         await checkReviveChance(apiKey);
                     };
@@ -375,11 +398,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             return;
         }
 
-        let userSkill = GM_getValue(SKILL_STORAGE_KEY, null);
-        if (userSkill === null) {
+        let userSkill = Number(GM_getValue(SKILL_STORAGE_KEY, null));
+        if (!Number.isFinite(userSkill)) {
             let reviveSkillInput = prompt("Enter your revive skill level (1-100). Leave blank to assume 100.");
             if (reviveSkillInput === null) return;
-            
+
             userSkill = 100.00;
             if (reviveSkillInput.trim() !== "") {
                 userSkill = Number.parseFloat(reviveSkillInput);
