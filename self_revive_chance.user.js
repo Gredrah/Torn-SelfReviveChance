@@ -170,41 +170,26 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     GM_registerMenuCommand("Clear stored revive skill", clearStoredSkill);
     GM_registerMenuCommand("Clear all Dragon's Heart Monitor data", clearAllStoredData);
 
-    // Ensure the user's revive skill is stored. Try API first, then prompt manual entry.
-    async function ensureUserSkillSaved() {
-        let stored = GM_getValue(SKILL_STORAGE_KEY, null);
-        if (stored !== null) return stored;
+    const promptForUserSkill = (storedSkill, promptText) => {
+        const hasStoredSkill = Number.isFinite(storedSkill);
+        const entry = hasStoredSkill
+            ? prompt(promptText, String(storedSkill))
+            : prompt(promptText);
 
-        const apiKey = getStoredApiKey();
-        if (apiKey && await isValidApiKey(apiKey)) {
-            try {
-                const reviveSkillLevel = getSkillLevel(await getSkillLevels(apiKey), 'reviving');
-                GM_setValue(SKILL_STORAGE_KEY, reviveSkillLevel);
-                debugLog('Local: ensureUserSkillSaved | Stored skill from API:', reviveSkillLevel);
-                return reviveSkillLevel;
-            } catch (err) {
-                debugLog('Local: ensureUserSkillSaved | Failed to fetch skill via API:', err);
-            }
-        }
+        if (entry === null) return null;
 
-        // Prompt for manual entry if API fetch didn't work or no API key present
-        try {
-            const entry = prompt('Enter your revive skill level (1-100) to store for Dragon\'s Heart Monitor. Leave blank to skip.');
-            if (entry === null) return null;
-            if (!entry.trim()) return null;
-            const val = Number.parseFloat(entry);
-            if (Number.isNaN(val) || val < 0 || val > 100) {
-                alert('Invalid skill level. Not saved.');
-                return null;
-            }
-            GM_setValue(SKILL_STORAGE_KEY, val);
-            debugLog('Local: ensureUserSkillSaved | Stored manual skill:', val);
-            return val;
-        } catch (err) {
-            debugLog('Local: ensureUserSkillSaved | Manual entry failed:', err);
+        const trimmedEntry = entry.trim();
+        if (!trimmedEntry) return hasStoredSkill ? storedSkill : 100;
+
+        const parsedSkill = Number.parseFloat(trimmedEntry);
+        if (Number.isNaN(parsedSkill) || parsedSkill < 0 || parsedSkill > 100) {
+            alert('Invalid skill level.');
             return null;
         }
-    }
+
+        GM_setValue(SKILL_STORAGE_KEY, parsedSkill);
+        return parsedSkill;
+    };
 
     const checkReviveChance = async (apiKey) => {
         let reviveSkillInput = prompt("Enter the reviver's skill level (1-100). Leave blank to assume 100.");
@@ -409,20 +394,20 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             return;
         }
 
-        let userSkill = Number(GM_getValue(SKILL_STORAGE_KEY, null));
+        const storedUserSkill = GM_getValue(SKILL_STORAGE_KEY, null);
+        let userSkill = Number(storedUserSkill);
         if (!Number.isFinite(userSkill)) {
-            let reviveSkillInput = prompt("Enter your revive skill level (1-100). Leave blank to assume 100.");
-            if (reviveSkillInput === null) return;
-
-            userSkill = 100.00;
-            if (reviveSkillInput.trim() !== "") {
-                userSkill = Number.parseFloat(reviveSkillInput);
-                if (Number.isNaN(userSkill) || userSkill < 0 || userSkill > 100) {
-                    alert("Invalid skill level.");
-                    return;
-                }
-            }
+            debugLog('Local: handleEstimateButtonClick | Invalid stored user skill:', storedUserSkill);
+            GM_deleteValue(SKILL_STORAGE_KEY);
         }
+
+        userSkill = promptForUserSkill(
+            Number.isFinite(userSkill) ? userSkill : null,
+            Number.isFinite(userSkill)
+                ? "Enter your revive skill level (1-100). Leave blank to use your saved skill."
+                : "Enter your revive skill level (1-100). Leave blank to assume 100."
+        );
+        if (userSkill === null) return;
 
         try {
             const timeRes = await getCurrentTimestamp(apiKey);
@@ -606,19 +591,25 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                                     const apiKey = getStoredApiKey();
                                     if (!apiKey) return;
 
-                                    let mySkill = GM_getValue(SKILL_STORAGE_KEY, null);
-                                    if (mySkill === null) {
-                                        debugLog('Local: Missing saved user skill. Attempting to ensure saved.');
-                                        await ensureUserSkillSaved();
-                                        mySkill = GM_getValue(SKILL_STORAGE_KEY, null);
-                                        if (mySkill === null) {
-                                            debugLog("Collection Aborted | Reason: No saved user skill after attempt");
-                                            return;
-                                        }
+                                    const storedMySkill = GM_getValue(SKILL_STORAGE_KEY, null);
+                                    let mySkill = Number(storedMySkill);
+                                    if (!Number.isFinite(mySkill)) {
+                                        debugLog('Local: Collection Math | Invalid stored user skill:', storedMySkill);
                                     }
+
+                                    mySkill = promptForUserSkill(
+                                        Number.isFinite(mySkill) ? mySkill : null,
+                                        Number.isFinite(mySkill)
+                                            ? "Enter your revive skill level (1-100). Leave blank to use your saved skill."
+                                            : "Enter your revive skill level (1-100). Leave blank to assume 100."
+                                    );
+                                    if (mySkill === null) return;
+
+                                    debugLog('Local: Collection Math | User Skill:', mySkill);
                                     
                                     const skillBase = 90 + (mySkill / 10);
                                     const skillMultiplier = 8 - (mySkill / 25);
+                                    debugLog('Local: Collection Math | Skill Base / Multiplier:', skillBase, skillMultiplier);
                                     let exactScoreTotal = (skillBase - chance) / skillMultiplier;
                                     if (exactScoreTotal < 0) exactScoreTotal = 0;
                                     
@@ -645,8 +636,6 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     };
 
     // Initialize 
-    // Ensure user's revive skill is stored proactively on page load
-    ensureUserSkillSaved();
     addMonitorButton();
     addEstimateButton();
     watchForReviveDialog();
