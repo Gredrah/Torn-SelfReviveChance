@@ -13,6 +13,7 @@
 // @grant GM_getValue
 // @grant GM_setValue
 // @connect api.gredra.com
+// @connect api.torn.com
 // ==/UserScript==
 
 // util/util.js
