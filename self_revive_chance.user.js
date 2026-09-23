@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.1
+// @version      1.1.2
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for each player in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
@@ -189,6 +189,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
         GM_setValue(SKILL_STORAGE_KEY, parsedSkill);
         return parsedSkill;
+    };
+
+    const getStoredUserSkill = () => {
+        const storedSkill = Number(GM_getValue(SKILL_STORAGE_KEY, null));
+        return Number.isFinite(storedSkill) ? storedSkill : null;
     };
 
     const checkReviveChance = async (apiKey) => {
@@ -394,16 +399,15 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             return;
         }
 
-        const storedUserSkill = GM_getValue(SKILL_STORAGE_KEY, null);
-        let userSkill = Number(storedUserSkill);
-        if (!Number.isFinite(userSkill)) {
-            debugLog('Local: handleEstimateButtonClick | Invalid stored user skill:', storedUserSkill);
+        const storedUserSkill = getStoredUserSkill();
+        if (storedUserSkill === null) {
+            debugLog('Local: handleEstimateButtonClick | Invalid stored user skill:', GM_getValue(SKILL_STORAGE_KEY, null));
             GM_deleteValue(SKILL_STORAGE_KEY);
         }
 
-        userSkill = promptForUserSkill(
-            Number.isFinite(userSkill) ? userSkill : null,
-            Number.isFinite(userSkill)
+        const userSkill = promptForUserSkill(
+            storedUserSkill,
+            storedUserSkill !== null
                 ? "Enter your revive skill level (1-100). Leave blank to use your saved skill."
                 : "Enter your revive skill level (1-100). Leave blank to assume 100."
         );
@@ -591,19 +595,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                                     const apiKey = getStoredApiKey();
                                     if (!apiKey) return;
 
-                                    const storedMySkill = GM_getValue(SKILL_STORAGE_KEY, null);
-                                    let mySkill = Number(storedMySkill);
-                                    if (!Number.isFinite(mySkill)) {
-                                        debugLog('Local: Collection Math | Invalid stored user skill:', storedMySkill);
+                                    const mySkill = getStoredUserSkill();
+                                    if (mySkill === null) {
+                                        debugLog('Local: Collection Math | Skipping collection because no valid stored user skill is available.');
+                                        return;
                                     }
-
-                                    mySkill = promptForUserSkill(
-                                        Number.isFinite(mySkill) ? mySkill : null,
-                                        Number.isFinite(mySkill)
-                                            ? "Enter your revive skill level (1-100). Leave blank to use your saved skill."
-                                            : "Enter your revive skill level (1-100). Leave blank to assume 100."
-                                    );
-                                    if (mySkill === null) return;
 
                                     debugLog('Local: Collection Math | User Skill:', mySkill);
                                     
