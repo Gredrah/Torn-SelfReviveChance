@@ -648,7 +648,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                         );
 
                         debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
-                        secondarySection = `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%`;
+                        secondarySection = `\n\nLast Known Chance Predicts: ${secondaryEstimate.chance.toFixed(2)}%`;
                     }
 
                     debugLog('Local: estimate revives_events | No events in 24h. Returning 100% primary estimate.');
@@ -656,8 +656,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                     alert(
                         `Estimation Results:\n\n` +
                         `Estimated Current Chance: 100.00%\n\n` +
-                        `No revive events were recorded for this target in the last 24 hours.\n` +
-                        `Model: revive_events (24h)` +
+                        `No revive events were recorded for this target in the last 24 hours,\n` +
+                        `rely instead on last known chance data.\n` +
                         secondarySection
                     );
                     return;
