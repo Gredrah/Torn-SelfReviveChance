@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.3
+// @version      1.1.4
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
@@ -206,6 +206,20 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         if (!PASSIVE_INTERVAL_OPTIONS_MINUTES.includes(parsedMinutes)) return false;
         GM_setValue(PASSIVE_INTERVAL_MINUTES_KEY, parsedMinutes);
         return true;
+    };
+
+    const shouldRunPassiveCollectionNow = (lastRunTimestamp, intervalMinutes, currentTimestampSeconds) => {
+        const parsedIntervalMinutes = Number(intervalMinutes);
+        const parsedLastRunTimestamp = Number(lastRunTimestamp);
+        const parsedCurrentTimestampSeconds = Number(currentTimestampSeconds);
+
+        if (!Number.isFinite(parsedIntervalMinutes) || parsedIntervalMinutes <= 0) return false;
+        if (!Number.isFinite(parsedCurrentTimestampSeconds) || parsedCurrentTimestampSeconds <= 0) return false;
+
+        if (!Number.isFinite(parsedLastRunTimestamp) || parsedLastRunTimestamp <= 0) return false;
+
+        const intervalSeconds = parsedIntervalMinutes * 60;
+        return parsedCurrentTimestampSeconds - parsedLastRunTimestamp >= intervalSeconds;
     };
 
     const promptForUserSkill = (storedSkill, promptText) => {
@@ -624,28 +638,28 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 });
 
                 if (events.length === 0) {
+                    let secondarySection = '';
                     if (legacyDataForSecondary) {
-                        const fallbackEstimate = estimateCurrentChance(
+                        const secondaryEstimate = estimateCurrentChance(
                             legacyDataForSecondary.scoreTotal,
                             legacyDataForSecondary.lastUpdated,
                             userSkill,
                             currentTornTimestamp
                         );
 
-                        debugLog('Local: estimate revives_events | 0 events; computed legacy fallback estimate:', fallbackEstimate.chance.toFixed(2));
-
-                        alert(
-                            `Estimation Results:\n\n` +
-                            `Fallback Chance: ${fallbackEstimate.chance.toFixed(2)}%\n\n` +
-                            `No revive events were recorded for this target in the last 24 hours.\n` +
-                            `Model fallback: legacy aggregate`
-                        );
-                        return;
+                        debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
+                        secondarySection = `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%`;
                     }
 
                     debugLog('Local: estimate revives_events | No events in 24h. Returning 100% primary estimate.');
 
-                    alert("No revive data found for this player in the database.");
+                    alert(
+                        `Estimation Results:\n\n` +
+                        `Estimated Current Chance: 100.00%\n\n` +
+                        `No revive events were recorded for this target in the last 24 hours.\n` +
+                        `Model: revive_events (24h)` +
+                        secondarySection
+                    );
                     return;
                 }
 
@@ -670,10 +684,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                     chance: estimate.chance,
                     scoreTotal: estimate.scoreTotal,
                     eventCount: estimate.eventCount,
-                    shouldShowSecondaryLinearDecay: showSecondary,
+                    shouldShowSecondaryLinearDecay: shouldShowSecondary,
                     secondaryIsLower,
                 });
 
+                const notes = [];
                 let secondaryEstimateSection = '';
                 if (shouldShowSecondary) {
                     debugLog('Local: estimate revives_events | Secondary linear decay estimate appended:', secondaryEstimate.chance.toFixed(2));
@@ -682,8 +697,23 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                         (secondaryIsLower
                             ? `\nCondition: secondary estimate is lower than the primary model.`
                             : `\nCondition: target last action is newer than most recent revive event.`);
+                    if (secondaryIsLower) {
+                        notes.push('Legacy estimate is lower than the revive-events estimate.');
+                    }
                 } else {
-                    debugLog('Local: estimate revives_events | Secondary linear decay estimate not shown.');
+                    if (!legacyDataForSecondary) {
+                        notes.push('Legacy estimate is unavailable for this target.');
+                    } else if (targetLastActionTimestamp <= latestReviveTimestamp) {
+                        notes.push('Legacy estimate is available but not newer than the latest revive event.');
+                    } else {
+                        notes.push('Legacy estimate is available but not lower than the revive-events estimate.');
+                    }
+                    debugLog('Local: estimate revives_events | Secondary linear decay estimate not shown.', {
+                        targetLastActionTimestamp,
+                        latestReviveTimestamp,
+                        hasLegacyDataForSecondary: !!legacyDataForSecondary,
+                        secondaryIsLower,
+                    });
                 }
 
                 alert(
@@ -692,6 +722,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                     `Events used (last 24h): ${estimate.eventCount}\n` +
                     `Computed Score Total: ${estimate.scoreTotal.toFixed(4)}\n` +
                     `Model: revive_events (24h)` +
+                    (notes.length ? `\n${notes.join('\n')}` : '') +
                     secondaryEstimateSection
                 );
                 return;
@@ -922,7 +953,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         }
     };
 
-    const runPassiveRevivesCollection = async (reason = 'interval') => {
+    const runPassiveRevivesCollection = async (reason = 'interval', currentTimestampSeconds = null) => {
         if (window.__dragonHeartPassiveCollectionInFlight) {
             debugLog('Passive Collection: skipped because previous run is still in flight.', { reason });
             return;
@@ -936,9 +967,13 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 return;
             }
 
-            const currentTimestampResponse = await getCurrentTimestamp(apiKey);
-            const currentTimestampSeconds = Number(currentTimestampResponse?.timestamp);
-            if (!Number.isFinite(currentTimestampSeconds) || currentTimestampSeconds <= 0) {
+            let resolvedCurrentTimestampSeconds = Number(currentTimestampSeconds);
+            if (!Number.isFinite(resolvedCurrentTimestampSeconds) || resolvedCurrentTimestampSeconds <= 0) {
+                const currentTimestampResponse = await getCurrentTimestamp(apiKey);
+                resolvedCurrentTimestampSeconds = Number(currentTimestampResponse?.timestamp);
+            }
+
+            if (!Number.isFinite(resolvedCurrentTimestampSeconds) || resolvedCurrentTimestampSeconds <= 0) {
                 debugLog('Passive Collection: skipped due to invalid server timestamp.', { reason });
                 return;
             }
@@ -946,11 +981,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             const lastPushed = getStoredLastRevivesFullPushTimestamp();
             const fromUnixSeconds = lastPushed > 0
                 ? Math.max(0, lastPushed - PASSIVE_COLLECTION_OVERLAP_SECONDS)
-                : getFromTimestampForLastHours(currentTimestampSeconds, 24);
+                : getFromTimestampForLastHours(resolvedCurrentTimestampSeconds, 24);
 
             const revives = await fetchRevives(apiKey, fromUnixSeconds);
-            await pushRevivesFullToWorker(apiKey, revives, currentTimestampSeconds);
-            setStoredLastPassiveRunTimestamp(currentTimestampSeconds);
+            await pushRevivesFullToWorker(apiKey, revives, resolvedCurrentTimestampSeconds);
+            setStoredLastPassiveRunTimestamp(resolvedCurrentTimestampSeconds);
 
             debugLog('Passive Collection: completed.', {
                 reason,
@@ -1006,24 +1041,50 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         debugLog('Passive Collection: scheduler starting.', {
             reason,
             intervalMinutes,
+            lastRunTimestamp: getStoredLastPassiveRunTimestamp(),
         });
-        void runPassiveRevivesCollection('startup');
+
+        void maybeRunPassiveRevivesCollection('startup');
 
         const intervalId = window.setInterval(() => {
-            void runPassiveRevivesCollection('interval');
+            void maybeRunPassiveRevivesCollection('interval');
         }, intervalMs);
 
         window.__dragonHeartPassiveCollectionIntervalId = intervalId;
 
         window.addEventListener('visibilitychange', () => {
             if (document.visibilityState !== 'visible') return;
-
-            const lastRunTimestamp = getStoredLastPassiveRunTimestamp();
-            const nowUnixSeconds = Math.floor(Date.now() / 1000);
-            if (!lastRunTimestamp || nowUnixSeconds - lastRunTimestamp >= intervalMs / 1000) {
-                void runPassiveRevivesCollection('visibility-resume');
-            }
+            void maybeRunPassiveRevivesCollection('visibility-resume');
         });
+    };
+
+    const maybeRunPassiveRevivesCollection = async (reason = 'interval') => {
+        const apiKey = getStoredApiKey();
+        if (!apiKey || !(await isValidApiKey(apiKey))) {
+            debugLog('Passive Collection: skipped due to missing or invalid API key.', { reason });
+            return;
+        }
+
+        const currentTimestampResponse = await getCurrentTimestamp(apiKey);
+        const currentTimestampSeconds = Number(currentTimestampResponse?.timestamp);
+        if (!Number.isFinite(currentTimestampSeconds) || currentTimestampSeconds <= 0) {
+            debugLog('Passive Collection: skipped due to invalid server timestamp.', { reason });
+            return;
+        }
+
+        const intervalMinutes = getStoredPassiveIntervalMinutes();
+        const lastRunTimestamp = getStoredLastPassiveRunTimestamp();
+        if (!shouldRunPassiveCollectionNow(lastRunTimestamp, intervalMinutes, currentTimestampSeconds)) {
+            debugLog('Passive Collection: skipped because interval has not elapsed yet.', {
+                reason,
+                lastRunTimestamp,
+                currentTimestampSeconds,
+                intervalMinutes,
+            });
+            return;
+        }
+
+        await runPassiveRevivesCollection(reason, currentTimestampSeconds);
     };
 
     const getTargetIdFromDOM = () => {
