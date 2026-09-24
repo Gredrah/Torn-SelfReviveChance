@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.4
+// @version      1.1.5
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
@@ -582,6 +582,14 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             });
         });
 
+    const showNoEstimateDataAvailable = () => {
+        alert(
+            `Estimation Results:\n\n` +
+            `No data is available for this target yet.\n\n` +
+            `Have a reviver check the percentage on the profile so the database can be updated.`
+        );
+    };
+
     const handleEstimateButtonClick = async () => {
         const targetId = getTargetIdFromDOM();
         debugLog('Event: Estimate Button Clicked | Target:', targetId);
@@ -638,27 +646,27 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 });
 
                 if (events.length === 0) {
-                    let secondarySection = '';
-                    if (legacyDataForSecondary) {
-                        const secondaryEstimate = estimateCurrentChance(
-                            legacyDataForSecondary.scoreTotal,
-                            legacyDataForSecondary.lastUpdated,
-                            userSkill,
-                            currentTornTimestamp
-                        );
-
-                        debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
-                        secondarySection = `\n\nLast Known Chance Predicts: ${secondaryEstimate.chance.toFixed(2)}%`;
+                    if (!legacyDataForSecondary) {
+                        debugLog('Local: estimate revives_events | No events and no legacy data available for target:', targetId);
+                        showNoEstimateDataAvailable();
+                        return;
                     }
 
-                    debugLog('Local: estimate revives_events | No events in 24h. Returning 100% primary estimate.');
+                    const secondaryEstimate = estimateCurrentChance(
+                        legacyDataForSecondary.scoreTotal,
+                        legacyDataForSecondary.lastUpdated,
+                        userSkill,
+                        currentTornTimestamp
+                    );
+
+                    debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
 
                     alert(
                         `Estimation Results:\n\n` +
                         `Estimated Current Chance: 100.00%\n\n` +
                         `No revive events were recorded for this target in the last 24 hours,\n` +
-                        `rely instead on last known chance data.\n` +
-                        secondarySection
+                        `relying instead on last known chance data.\n\n` +
+                        `Last Known Chance Predicts: ${secondaryEstimate.chance.toFixed(2)}%`
                     );
                     return;
                 }
@@ -733,7 +741,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             const legacyData = await fetchLegacyEstimateData(targetId);
             if (!legacyData) {
                 debugLog('Local: estimate fallback | No legacy data found for target:', targetId);
-                alert("No revive data found for this player in the database.");
+                showNoEstimateDataAvailable();
                 return;
             }
 
