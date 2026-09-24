@@ -461,6 +461,13 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         };
     };
 
+    const shouldShowSecondaryLinearDecay = (targetLastActionTimestamp, latestReviveTimestamp, legacyData) => {
+        return Number.isFinite(targetLastActionTimestamp) &&
+            Number.isFinite(latestReviveTimestamp) &&
+            targetLastActionTimestamp > latestReviveTimestamp &&
+            !!legacyData;
+    };
+
     const fetchTargetReviveEvents = async (targetId, sinceSeconds = SECONDS_PER_DAY, limit = 500) => {
         const normalizedTargetId = Number.parseInt(targetId, 10);
         if (!Number.isFinite(normalizedTargetId) || normalizedTargetId <= 0) {
@@ -643,21 +650,21 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 }
 
                 const estimate = calculateChanceFromEvents(events, userSkill, currentTornTimestamp);
-                const shouldShowSecondaryLinearDecay =
-                    Number.isFinite(targetLastActionTimestamp) &&
-                    Number.isFinite(latestReviveTimestamp) &&
-                    targetLastActionTimestamp > latestReviveTimestamp &&
-                    !!legacyDataForSecondary;
+                const showSecondaryLinearDecay = shouldShowSecondaryLinearDecay(
+                    targetLastActionTimestamp,
+                    latestReviveTimestamp,
+                    legacyDataForSecondary
+                );
 
                 debugLog('Local: estimate revives_events | Primary Estimate:', {
                     chance: estimate.chance,
                     scoreTotal: estimate.scoreTotal,
                     eventCount: estimate.eventCount,
-                    shouldShowSecondaryLinearDecay,
+                    shouldShowSecondaryLinearDecay: showSecondaryLinearDecay,
                 });
 
                 let secondaryEstimateSection = '';
-                if (shouldShowSecondaryLinearDecay) {
+                if (showSecondaryLinearDecay) {
                     const secondaryEstimate = estimateCurrentChance(
                         legacyDataForSecondary.scoreTotal,
                         legacyDataForSecondary.lastUpdated,
