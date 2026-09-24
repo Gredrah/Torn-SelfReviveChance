@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.2
+// @version      1.1.3
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
