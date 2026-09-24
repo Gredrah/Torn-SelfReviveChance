@@ -624,57 +624,64 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
                 });
 
                 if (events.length === 0) {
-                    let secondarySection = '';
                     if (legacyDataForSecondary) {
-                        const secondaryEstimate = estimateCurrentChance(
+                        const fallbackEstimate = estimateCurrentChance(
                             legacyDataForSecondary.scoreTotal,
                             legacyDataForSecondary.lastUpdated,
                             userSkill,
                             currentTornTimestamp
                         );
 
-                        debugLog('Local: estimate revives_events | 0 events; computed secondary legacy estimate:', secondaryEstimate.chance.toFixed(2));
-                        secondarySection = `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%`;
+                        debugLog('Local: estimate revives_events | 0 events; computed legacy fallback estimate:', fallbackEstimate.chance.toFixed(2));
+
+                        alert(
+                            `Estimation Results:\n\n` +
+                            `Fallback Chance: ${fallbackEstimate.chance.toFixed(2)}%\n\n` +
+                            `No revive events were recorded for this target in the last 24 hours.\n` +
+                            `Model fallback: legacy aggregate`
+                        );
+                        return;
                     }
 
                     debugLog('Local: estimate revives_events | No events in 24h. Returning 100% primary estimate.');
 
-                    alert(
-                        `Estimation Results:\n\n` +
-                        `Estimated Current Chance: 100.00%\n\n` +
-                        `No revive events were recorded for this target in the last 24 hours.\n` +
-                        `Model: revive_events (24h)` +
-                        secondarySection
-                    );
+                    alert("No revive data found for this player in the database.");
                     return;
                 }
 
                 const estimate = calculateChanceFromEvents(events, userSkill, currentTornTimestamp);
+                const secondaryEstimate = legacyDataForSecondary
+                    ? estimateCurrentChance(
+                        legacyDataForSecondary.scoreTotal,
+                        legacyDataForSecondary.lastUpdated,
+                        userSkill,
+                        currentTornTimestamp
+                    )
+                    : null;
+                const secondaryIsLower = !!secondaryEstimate && secondaryEstimate.chance < estimate.chance;
                 const showSecondaryLinearDecay = shouldShowSecondaryLinearDecay(
                     targetLastActionTimestamp,
                     latestReviveTimestamp,
                     legacyDataForSecondary
                 );
+                const shouldShowSecondary = !!secondaryEstimate && (showSecondaryLinearDecay || secondaryIsLower);
 
                 debugLog('Local: estimate revives_events | Primary Estimate:', {
                     chance: estimate.chance,
                     scoreTotal: estimate.scoreTotal,
                     eventCount: estimate.eventCount,
-                    shouldShowSecondaryLinearDecay: showSecondaryLinearDecay,
+                    shouldShowSecondaryLinearDecay: showSecondary,
+                    secondaryIsLower,
                 });
 
                 let secondaryEstimateSection = '';
-                if (showSecondaryLinearDecay) {
-                    const secondaryEstimate = estimateCurrentChance(
-                        legacyDataForSecondary.scoreTotal,
-                        legacyDataForSecondary.lastUpdated,
-                        userSkill,
-                        currentTornTimestamp
-                    );
+                if (shouldShowSecondary) {
                     debugLog('Local: estimate revives_events | Secondary linear decay estimate appended:', secondaryEstimate.chance.toFixed(2));
                     secondaryEstimateSection =
                         `\n\nSecondary (linear decay from last-known chance): ${secondaryEstimate.chance.toFixed(2)}%` +
-                        `\nCondition: target last action is newer than most recent revive event.`;
+                        (secondaryIsLower
+                            ? `\nCondition: secondary estimate is lower than the primary model.`
+                            : `\nCondition: target last action is newer than most recent revive event.`);
                 } else {
                     debugLog('Local: estimate revives_events | Secondary linear decay estimate not shown.');
                 }
