@@ -144,9 +144,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
     const SKILL_STORAGE_KEY = "monitor_revive_skill";
     const REVIVES_FULL_LAST_PUSH_TS_KEY = "monitor_revives_full_last_push_ts";
     const PASSIVE_LAST_RUN_TS_KEY = "monitor_passive_last_run_ts";
+    const PASSIVE_INTERVAL_MINUTES_KEY = "monitor_passive_interval_minutes";
     const API_KEY_URL = "https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Dragon's Heart Monitor&user=basic,revivesfull,skills";
     const CLOUDFLARE_API_URL = "https://revives.api.gredra.com";
-    const PASSIVE_COLLECTION_INTERVAL_MS = 60 * 60 * 1000;
+    const PASSIVE_INTERVAL_OPTIONS_MINUTES = [15, 30, 45, 60];
+    const DEFAULT_PASSIVE_INTERVAL_MINUTES = 60;
     const PASSIVE_COLLECTION_OVERLAP_SECONDS = 300;
     
     let lastSubmittedData = ""; 
@@ -169,6 +171,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         GM_deleteValue(SKILL_STORAGE_KEY);
         GM_deleteValue(REVIVES_FULL_LAST_PUSH_TS_KEY);
         GM_deleteValue(PASSIVE_LAST_RUN_TS_KEY);
+        GM_deleteValue(PASSIVE_INTERVAL_MINUTES_KEY);
         alert("Stored API key and revive skill cleared.");
     };
 
@@ -189,6 +192,20 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         if (Number.isFinite(parsedTimestamp) && parsedTimestamp > 0) {
             GM_setValue(PASSIVE_LAST_RUN_TS_KEY, parsedTimestamp);
         }
+    };
+
+    const getStoredPassiveIntervalMinutes = () => {
+        const value = Number(GM_getValue(PASSIVE_INTERVAL_MINUTES_KEY, DEFAULT_PASSIVE_INTERVAL_MINUTES));
+        return PASSIVE_INTERVAL_OPTIONS_MINUTES.includes(value)
+            ? value
+            : DEFAULT_PASSIVE_INTERVAL_MINUTES;
+    };
+
+    const setStoredPassiveIntervalMinutes = (minutes) => {
+        const parsedMinutes = Number(minutes);
+        if (!PASSIVE_INTERVAL_OPTIONS_MINUTES.includes(parsedMinutes)) return false;
+        GM_setValue(PASSIVE_INTERVAL_MINUTES_KEY, parsedMinutes);
+        return true;
     };
 
     const promptForUserSkill = (storedSkill, promptText) => {
@@ -933,15 +950,54 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         }
     };
 
-    const initializePassiveRevivesCollection = () => {
+    const stopPassiveRevivesCollection = () => {
+        if (window.__dragonHeartPassiveCollectionIntervalId) {
+            window.clearInterval(window.__dragonHeartPassiveCollectionIntervalId);
+            window.__dragonHeartPassiveCollectionIntervalId = null;
+        }
+    };
+
+    const restartPassiveRevivesCollection = (reason = 'manual-restart') => {
+        stopPassiveRevivesCollection();
+        initializePassiveRevivesCollection(reason);
+    };
+
+    const registerPassiveCollectionMenuCommands = () => {
+        GM_registerMenuCommand('Refresh revives on server now', () => {
+            void runPassiveRevivesCollection('manual-menu-refresh');
+        });
+
+        for (const minutes of PASSIVE_INTERVAL_OPTIONS_MINUTES) {
+            GM_registerMenuCommand(`Set passive refresh interval: ${minutes} minutes`, () => {
+                const changed = setStoredPassiveIntervalMinutes(minutes);
+                if (!changed) {
+                    alert('Failed to update passive refresh interval setting.');
+                    return;
+                }
+
+                restartPassiveRevivesCollection('menu-interval-change');
+                alert(`Passive refresh interval updated to every ${minutes} minutes.`);
+            });
+        }
+    };
+
+    registerPassiveCollectionMenuCommands();
+
+    const initializePassiveRevivesCollection = (reason = 'startup') => {
         if (window.__dragonHeartPassiveCollectionIntervalId) return;
 
-        debugLog('Passive Collection: scheduler starting (60m interval).');
+        const intervalMinutes = getStoredPassiveIntervalMinutes();
+        const intervalMs = intervalMinutes * 60 * 1000;
+
+        debugLog('Passive Collection: scheduler starting.', {
+            reason,
+            intervalMinutes,
+        });
         void runPassiveRevivesCollection('startup');
 
         const intervalId = window.setInterval(() => {
             void runPassiveRevivesCollection('interval');
-        }, PASSIVE_COLLECTION_INTERVAL_MS);
+        }, intervalMs);
 
         window.__dragonHeartPassiveCollectionIntervalId = intervalId;
 
@@ -950,7 +1006,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
 
             const lastRunTimestamp = getStoredLastPassiveRunTimestamp();
             const nowUnixSeconds = Math.floor(Date.now() / 1000);
-            if (!lastRunTimestamp || nowUnixSeconds - lastRunTimestamp >= PASSIVE_COLLECTION_INTERVAL_MS / 1000) {
+            if (!lastRunTimestamp || nowUnixSeconds - lastRunTimestamp >= intervalMs / 1000) {
                 void runPassiveRevivesCollection('visibility-resume');
             }
         });
