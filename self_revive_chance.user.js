@@ -391,7 +391,15 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleMonitorButtonClick);
 
-        linksWrap.insertBefore(button, linksWrap.firstChild);
+        const firstNonInjected = Array.from(linksWrap.children).find(
+            (el) => !el.id || (!el.id.startsWith('dragon-heart-') && !el.id.startsWith('dxm-revive-group-'))
+        );
+
+        if (firstNonInjected) {
+            linksWrap.insertBefore(button, firstNonInjected);
+        } else {
+            linksWrap.appendChild(button);
+        }
     };
 
     // ==========================================
@@ -825,7 +833,15 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleEstimateButtonClick);
 
-        linksWrap.insertBefore(button, linksWrap.firstChild);
+        const firstNonInjected = Array.from(linksWrap.children).find(
+            (el) => !el.id || (!el.id.startsWith('dragon-heart-') && !el.id.startsWith('dxm-revive-group-'))
+        );
+
+        if (firstNonInjected) {
+            linksWrap.insertBefore(button, firstNonInjected);
+        } else {
+            linksWrap.appendChild(button);
+        }
     };
 
     // ==========================================
