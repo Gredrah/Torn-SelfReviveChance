@@ -827,23 +827,16 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             clear: none;
             position: relative;
             left: 0;
-            order: -1 !important;
-            margin-right: auto !important;
         `;
 
         button.addEventListener('mouseenter', () => { button.style.background = 'rgba(210, 45, 45, 0.8)'; });
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleEstimateButtonClick);
 
-        const firstNonInjected = Array.from(linksWrap.children).find(
-            (el) => !el.id || (!el.id.startsWith('dragon-heart-') && !el.id.startsWith('dxm-revive-group-'))
-        );
+        const insertionTarget = Array.from(linksWrap.children).find((el) => el.classList?.contains('clear')) || null;
 
-        if (firstNonInjected) {
-            linksWrap.insertBefore(button, firstNonInjected);
-        } else {
-            linksWrap.appendChild(button);
-        }
+        if (insertionTarget) insertionTarget.before(button);
+        else linksWrap.appendChild(button);
     };
 
     // ==========================================
