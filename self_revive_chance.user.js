@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.9
+// @version      1.2.0
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
@@ -381,7 +381,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             cursor: pointer;
             white-space: nowrap;
             transition: background 0.15s ease;
-            float: none;
+            float: left;
             clear: none;
             position: relative;
             left: 0;
@@ -391,15 +391,21 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleMonitorButtonClick);
 
-        const firstNonInjected = Array.from(linksWrap.children).find(
-            (el) => !el.id || (!el.id.startsWith('dragon-heart-') && !el.id.startsWith('dxm-revive-group-'))
-        );
+        const insertionTarget = Array.from(linksWrap.children).find((el) => {
+            if (!el) return false;
+            if (el.id?.startsWith('dragon-heart-')) return false;
+            if (el.id?.startsWith('dxm-revive-group-')) return false;
+            if (el.classList?.contains('clear')) return false;
+            return el.classList?.contains('revive-availability-btn') ||
+                el.classList?.contains('city') ||
+                el.classList?.contains('tutorial-switcher') ||
+                el.classList?.contains('tt-revive') ||
+                el.tagName === 'A' ||
+                el.tagName === 'BUTTON';
+        }) || null;
 
-        if (firstNonInjected) {
-            linksWrap.insertBefore(button, firstNonInjected);
-        } else {
-            linksWrap.appendChild(button);
-        }
+        if (insertionTarget) insertionTarget.before(button);
+        else linksWrap.appendChild(button);
     };
 
     // ==========================================
@@ -833,7 +839,18 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
         button.addEventListener('click', handleEstimateButtonClick);
 
-        const insertionTarget = Array.from(linksWrap.children).find((el) => el.classList?.contains('clear')) || null;
+        const insertionTarget = Array.from(linksWrap.children).find((el) => {
+            if (!el) return false;
+            if (el.id?.startsWith('dragon-heart-')) return false;
+            if (el.id?.startsWith('dxm-revive-group-')) return false;
+            if (el.classList?.contains('clear')) return false;
+            return el.classList?.contains('revive-availability-btn') ||
+                el.classList?.contains('city') ||
+                el.classList?.contains('tutorial-switcher') ||
+                el.classList?.contains('tt-revive') ||
+                el.tagName === 'A' ||
+                el.tagName === 'BUTTON';
+        }) || null;
 
         if (insertionTarget) insertionTarget.before(button);
         else linksWrap.appendChild(button);
