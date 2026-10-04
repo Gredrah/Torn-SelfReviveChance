@@ -3,7 +3,7 @@
 // @author       Gredrah
 // @namespace    https://www.github.com/gredrah/
 //
-// @version      1.1.6
+// @version      1.1.7
 // @description  Provides Torn players with a quick way to check their revive chance against different skill levels of reviver. Accessed via the Hospital page. Also collects and stores the last known revive chance for all players, and the incoming revive log of participants in a Cloudflare Worker database, which can be used to estimate the current revive chance of a target player.
 // @match        https://www.torn.com/hospitalview.php*
 // @match        https://www.torn.com/profiles.php*
@@ -383,6 +383,8 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             transition: background 0.15s ease;
             float: none;
             clear: none;
+            position: relative;
+            left: 0;
         `;
 
         button.addEventListener('mouseenter', () => { button.style.background = 'rgba(210, 45, 45, 0.8)'; });
@@ -803,7 +805,7 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             height: 24px;
             line-height: 1;
             padding: 0 10px;
-            margin-left: 0;
+            margin: 0 8px 0 0;
             border: 1px solid rgba(255,255,255,0.18);
             border-radius: 4px;
             background: ${redBase};
@@ -813,10 +815,11 @@ async function fetchRevives(apiKey, fromUnixSeconds = 0) {
             cursor: pointer;
             white-space: nowrap;
             transition: background 0.15s ease;
+            float: none;
+            clear: none;
+            position: relative;
+            left: 0;
         `;
-        button.style.cssFloat = 'left';
-        button.style.clear = 'left';
-        button.style.marginRight = '8px';
 
         button.addEventListener('mouseenter', () => { button.style.background = 'rgba(210, 45, 45, 0.8)'; });
         button.addEventListener('mouseleave', () => { button.style.background = redBase; });
